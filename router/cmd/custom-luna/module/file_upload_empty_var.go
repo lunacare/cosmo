@@ -58,13 +58,12 @@ func (m *FileUploadEmptyVarModule) RouterOnRequest(ctx core.RequestContext, next
 		return
 	}
 
-	operations, formHasOperations := form.Value["operations"]
+	operations, operationsExists := form.Value["operations"]
 	maps, mapPartExists := form.Value["map"]
 
-	parsedOperations := operations[0]
+	var parsedOperations string
 
-	if formHasOperations && mapPartExists {
-
+	if operationsExists && mapPartExists {
 		var jsonOperations map[string]any
 		var jsonMap map[string]any
 
@@ -96,7 +95,7 @@ func (m *FileUploadEmptyVarModule) RouterOnRequest(ctx core.RequestContext, next
 	}
 
 	for key, values := range form.Value {
-		if key == "operations" {
+		if key == "operations" && parsedOperations != "" {
 			err = parsedMultipart.WriteField("operations", parsedOperations)
 			if err != nil {
 				core.WriteResponseError(ctx, fmt.Errorf("Error writing operations field: %w", err))
