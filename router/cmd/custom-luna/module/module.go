@@ -2,7 +2,6 @@ package module
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
 	"mime"
@@ -10,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/buger/jsonparser"
 	"github.com/wundergraph/cosmo/router/core"
 	"go.uber.org/zap"
 )
@@ -63,35 +63,43 @@ func (m *FileUploadEmptyVarModule) RouterOnRequest(ctx core.RequestContext, next
 
 	var parsedOperations string
 
-	if operationsExists && mapPartExists {
-		var jsonOperations map[string]any
-		var jsonMap map[string]any
+	if operationsExists && len(operations) > 0 && mapPartExists && len(maps) > 0 {
+		jsonOperations := []byte(operations[0])
+		jsonMap := []byte(maps[0])
 
-		err = json.Unmarshal([]byte(operations[0]), &jsonOperations)
-		if err != nil {
-			core.WriteResponseError(ctx, fmt.Errorf("Error unmarshalling operations: %w", err))
-			return
-		}
+		err = jsonparser.ObjectEach(jsonMap, func(_ []byte, paths []byte, dataType jsonparser.ValueType, _ int) error {
+			fmt.Println("paths", string(paths))
 
-		err = json.Unmarshal([]byte(maps[0]), &jsonMap)
-		if err != nil {
-			core.WriteResponseError(ctx, fmt.Errorf("Error unmarshalling map: %w", err))
-			return
-		}
-
-		for _, paths := range jsonMap {
-			for _, path := range paths.([]any) {
-				setNullAtPath(jsonOperations, path.(string))
+			if dataType != jsonparser.Array {
+				return nil
 			}
-		}
 
-		parsedOperationsBytes, err := json.Marshal(jsonOperations)
+			_, err = jsonparser.ArrayEach(paths, func(path []byte, dataType jsonparser.ValueType, offset int, err error) {
+				fmt.Println("path", string(path))
+
+				if err != nil {
+					return
+				}
+
+				if dataType != jsonparser.String {
+					return
+				}
+
+				pathElements := strings.Split(string(path), ".")
+
+
+				jsonOperations, err = jsonparser.Set(jsonOperations, []byte("null"), pathElements...)
+			})
+
+			return err
+		})
+
 		if err != nil {
-			core.WriteResponseError(ctx, fmt.Errorf("Error marshalling operations: %w", err))
+			core.WriteResponseError(ctx, fmt.Errorf("Error parsing map: %w", err))
 			return
 		}
 
-		parsedOperations = string(parsedOperationsBytes)
+		parsedOperations = string(jsonOperations)
 	}
 
 	for key, values := range form.Value {
@@ -145,27 +153,6 @@ func (m *FileUploadEmptyVarModule) RouterOnRequest(ctx core.RequestContext, next
 	r.Body = io.NopCloser(&body)
 
 	next.ServeHTTP(w, r)
-}
-
-func setNullAtPath(data map[string]any, path string) {
-	keys := strings.Split(path, ".")
-	subMap := data
-
-	for i, key := range keys {
-		// If this is the last key in the path, set it to nil and return.
-		if i == len(keys)-1 {
-			subMap[key] = nil
-			return
-		}
-
-		// If the next level doesn't exist or isn't a map, make a new one.
-		if _, ok := subMap[key].(map[string]any); !ok {
-			subMap[key] = make(map[string]any)
-		}
-
-		// Move deeper into the map for the next iteration.
-		subMap = subMap[key].(map[string]any)
-	}
 }
 
 func (m *FileUploadEmptyVarModule) Module() core.ModuleInfo {
