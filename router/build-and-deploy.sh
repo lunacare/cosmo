@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Get the root directory of the repository
+ROOT_DIR=$(git rev-parse --show-toplevel)
+cd "$ROOT_DIR"
+
 if [[ $# -ne 1 ]]; then
         echo "1 --- BUILD_AS_TEST - 'true' or 'false'"
         exit 1
@@ -10,7 +14,8 @@ BUILD_AS_TEST=$1
 ECR_REPO="lunacare-cosmo-router"
 ECR_URL="836236105554.dkr.ecr.us-west-2.amazonaws.com/$ECR_REPO"
 
-VERSION=$( grep -Eo '\[[0-9]+\.[0-9]+\.[0-9]+\]' CHANGELOG.md | tr -d '[]' | sort -V | tail -n1 )
+VERSION=$( grep -Eo '\[[0-9]+\.[0-9]+\.[0-9]+\]' ./router/CHANGELOG.md | tr -d '[]' | sort -V | tail -n1 )
+VERSION="$VERSION-lunacare-$(head -n 1 ./router/VERSION-LUNACARE)"
 VERSION_TAG="$ECR_URL:$VERSION"
 LATEST_TAG="$ECR_URL:latest"
 LATEST_TEST_TAG="$ECR_URL:latest-test"
@@ -59,11 +64,46 @@ export TAGS_TO_PUSH="$TAGS_TO_PUSH"
 
 IFS=' ' read -r -a TAG_ARGS_ARRAY <<< "$TAG_ARGS"
 
-docker buildx create --use --append
+# Create a new builder instance if it doesn't exist
+BUILDER_NAME="cosmo-multiplatform-builder"
+
+# Remove existing builder if it exists
+docker buildx rm "${BUILDER_NAME}" || true
+
+# Create new builder and bootstrap it
+docker buildx create --name "${BUILDER_NAME}" --driver docker-container --bootstrap
+
+# Use the builder
+docker buildx use "${BUILDER_NAME}"
 docker buildx inspect --bootstrap
+
+COMMIT_SHA=$(git rev-parse HEAD)
+DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+
+# Build and push the images
 docker buildx build \
-        --platform linux/amd64,linux/arm64 \
+        --platform linux/arm64 \
+        --build-arg TARGETOS=linux \
+        --build-arg TARGETARCH=arm64 \
+        --build-arg COMMIT_SHA=${COMMIT_SHA} \
+        --build-arg DATE=${DATE} \
+        --build-arg VERSION=${VERSION} \
         "${TAG_ARGS_ARRAY[@]}" \
         --push \
-        .
+        -f ./router/custom-luna.Dockerfile \
+        --progress plain \
+        ./router
+
+docker buildx build \
+        --platform linux/amd64 \
+        --build-arg TARGETOS=linux \
+        --build-arg TARGETARCH=amd64 \
+        --build-arg COMMIT_SHA=${COMMIT_SHA} \
+        --build-arg DATE=${DATE} \
+        --build-arg VERSION=${VERSION} \
+        "${TAG_ARGS_ARRAY[@]}" \
+        --push \
+        -f ./router/custom-luna.Dockerfile \
+        --progress plain \
+        ./router
 
