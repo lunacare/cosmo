@@ -22,7 +22,7 @@ RUN go mod download
 COPY . .
 
 # Run tests in short mode (skip tests requiring network)
-# RUN CGO_ENABLED=0 go test -v -short ./...
+RUN CGO_ENABLED=0 go test -v -short ./...
 
 # Build router
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
