@@ -2,9 +2,8 @@
 name: Build Luna Router
 on:
   push:
-    branches: [ main ]
-  pull_request:
-    types: [opened, synchronize]
+    branches:
+      - main
 
 jobs:
   build:
