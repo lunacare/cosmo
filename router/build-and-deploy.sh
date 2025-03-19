@@ -81,18 +81,20 @@ COMMIT_SHA=$(git rev-parse HEAD)
 DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
 
 # Build and push the images
-docker buildx build \
-        --platform linux/arm64 \
-        --build-arg TARGETOS=linux \
-        --build-arg TARGETARCH=arm64 \
-        --build-arg COMMIT_SHA=${COMMIT_SHA} \
-        --build-arg DATE=${DATE} \
-        --build-arg VERSION=${VERSION} \
-        "${TAG_ARGS_ARRAY[@]}" \
-        --push \
-        -f ./router/custom-luna.Dockerfile \
-        --progress plain \
-        ./router
+
+# For local development
+# docker buildx build \
+#         --platform linux/arm64 \
+#         --build-arg TARGETOS=linux \
+#         --build-arg TARGETARCH=arm64 \
+#         --build-arg COMMIT_SHA=${COMMIT_SHA} \
+#         --build-arg DATE=${DATE} \
+#         --build-arg VERSION=${VERSION} \
+#         "${TAG_ARGS_ARRAY[@]}" \
+#         --push \
+#         -f ./router/custom-luna.Dockerfile \
+#         --progress plain \
+#         ./router
 
 docker buildx build \
         --platform linux/amd64 \
