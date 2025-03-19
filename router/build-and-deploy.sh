@@ -7,7 +7,7 @@ if [[ $# -ne 1 ]]; then
 fi
 BUILD_AS_TEST=$1
 
-ECR_REPO=$(basename "$(pwd)")
+ECR_REPO="lunacare-cosmo-router"
 ECR_URL="836236105554.dkr.ecr.us-west-2.amazonaws.com/$ECR_REPO"
 
 VERSION=$( grep -Eo '\[[0-9]+\.[0-9]+\.[0-9]+\]' CHANGELOG.md | tr -d '[]' | sort -V | tail -n1 )
@@ -48,7 +48,6 @@ else
         TAGS_TO_PUSH="${LATEST_TAG} ${VERSION_TAG}"
 fi
 
-
 IFS=' ' read -r -a TAGS_TO_PUSH_ARRAY <<< "$TAGS_TO_PUSH"
 for TAG in "${TAGS_TO_PUSH_ARRAY[@]}"; do
         echo "Set tag to push: $TAG"
@@ -57,15 +56,6 @@ done
 export ECR_REPO="$ECR_REPO"
 export TAG_ARGS="$TAG_ARGS"
 export TAGS_TO_PUSH="$TAGS_TO_PUSH"
-
-
-
-
-
-
-
-
-
 
 IFS=' ' read -r -a TAG_ARGS_ARRAY <<< "$TAG_ARGS"
 
