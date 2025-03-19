@@ -4,6 +4,14 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
+    inputs:
+      BUILD_AS_TEST:
+        type: boolean
+        description: Builds latest-test instead of latest
+        required: true
+env:
+  BUILD_AS_TEST: ${{ inputs.BUILD_AS_TEST }}
 
 jobs:
   build:
@@ -17,11 +25,10 @@ jobs:
       - name: Build Docker Image
         run: |-
           export GITHUB_ACTIONS=true
-
-          if [[ "$GITHUB_REF" == "refs/heads/main" ]]; then
-            BUILD_AS_TEST=false
-          else
-            BUILD_AS_TEST=true
+          if [[ github.event_name == "workflow_dispatch" ]]; then
+            export BUILD_AS_TEST=$BUILD_AS_TEST
+          elif [[ github.event_name == "push" && github.ref == "refs/heads/main" ]]; then
+            export BUILD_AS_TEST=false
           fi
 
           bash ./router/build-and-deploy.sh "$BUILD_AS_TEST"
