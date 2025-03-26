@@ -216,8 +216,31 @@ func (h *GraphQLHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		defer propagateSubgraphErrors(resolveCtx)
 
+		respBuf := bytes.Buffer{}
+
+		resp, err := h.executor.Resolver.ResolveGraphQLResponse(resolveCtx, p.Response, nil, &respBuf)
+		reqCtx.dataSourceNames = getSubgraphNames(p.Response.DataSources)
+
+		if err != nil {
+			trackFinalResponseError(resolveCtx.Context(), err)
+			h.WriteError(resolveCtx, err, p.Response, w)
+			return
+		}
+
+		if errs := resolveCtx.SubgraphErrors(); errs != nil {
+			w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
+		}
+
+		// LUNA Care - Custom ===============
+
+		// If the response errors contain a 498 error, we need to write it to the http status
+		httpStatusCode498CheckWriter := HttpStatusCode498CheckWriter(w)
+
+		// LUNA Care - Custom ===============
+
 		// Write contents of buf to the header propagation writer
-		hpw := HeaderPropagationWriter(w, resolveCtx, true)
+		hpw := HeaderPropagationWriter(httpStatusCode498CheckWriter, resolveCtx, true)
+		_, err = respBuf.WriteTo(hpw)
 
 		// Attach router response header rules to the writer so they are applied
 		// at write time, after the resolve has completed (giving access to request.error etc.)
