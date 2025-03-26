@@ -195,8 +195,9 @@ func (h *GraphQLHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
 		}
 
-		// Write contents of buf to the header propagation writer
-		hpw := HeaderPropagationWriter(w, resolveCtx.Context())
+		// Write contents of buf to the header propagation writer with 498 status code check
+		httpStatusCode498CheckWriter := HttpStatusCode498CheckWriter(w)
+		hpw := HeaderPropagationWriter(httpStatusCode498CheckWriter, resolveCtx.Context())
 		_, err = respBuf.WriteTo(hpw)
 
 		if err != nil {
