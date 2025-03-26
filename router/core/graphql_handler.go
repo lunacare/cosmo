@@ -177,7 +177,9 @@ func (h *GraphQLHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		defer propagateSubgraphErrors(ctx)
 
-		resp, err := h.executor.Resolver.ResolveGraphQLResponse(ctx, p.Response, nil, HeaderPropagationWriter(w, ctx.Context()))
+		httpStatusCode498CheckWriter := HttpStatusCode498CheckWriter(w)
+
+		resp, err := h.executor.Resolver.ResolveGraphQLResponse(ctx, p.Response, nil, HeaderPropagationWriter(httpStatusCode498CheckWriter, ctx.Context()))
 		requestContext.dataSourceNames = getSubgraphNames(p.Response.DataSources)
 
 		if err != nil {
