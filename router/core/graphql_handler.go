@@ -195,8 +195,15 @@ func (h *GraphQLHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
 		}
 
+		// LUNA Care - Custom ===============
+
+		// If the response errors contain a 498 error, we need to write it to the http status
+		httpStatusCode498CheckWriter := HttpStatusCode498CheckWriter(w)
+
+		// LUNA Care - Custom ===============
+
 		// Write contents of buf to the header propagation writer
-		hpw := HeaderPropagationWriter(w, resolveCtx.Context())
+		hpw := HeaderPropagationWriter(httpStatusCode498CheckWriter, resolveCtx.Context())
 		_, err = respBuf.WriteTo(hpw)
 
 		if err != nil {
