@@ -2,23 +2,28 @@ package metric
 
 import (
 	"fmt"
+
 	otelmetric "go.opentelemetry.io/otel/metric"
 )
 
 // Measurements holds the metrics for the request.
 type Measurements struct {
-	counters       map[string]otelmetric.Int64Counter
-	histograms     map[string]otelmetric.Float64Histogram
-	upDownCounters map[string]otelmetric.Int64UpDownCounter
+	counters         map[string]otelmetric.Int64Counter
+	histograms       map[string]otelmetric.Float64Histogram
+	upDownCounters   map[string]otelmetric.Int64UpDownCounter
+	gauges           map[string]otelmetric.Int64Gauge
+	observableGauges map[string]otelmetric.Int64ObservableGauge
 }
 
 // createMeasures creates the measures. Used to create measures for both Prometheus and OTLP metric stores.
-func createMeasures(meter otelmetric.Meter) (*Measurements, error) {
+func createMeasures(meter otelmetric.Meter, opts MetricOpts) (*Measurements, error) {
 
 	h := &Measurements{
-		counters:       map[string]otelmetric.Int64Counter{},
-		histograms:     map[string]otelmetric.Float64Histogram{},
-		upDownCounters: map[string]otelmetric.Int64UpDownCounter{},
+		counters:         map[string]otelmetric.Int64Counter{},
+		histograms:       map[string]otelmetric.Float64Histogram{},
+		upDownCounters:   map[string]otelmetric.Int64UpDownCounter{},
+		gauges:           map[string]otelmetric.Int64Gauge{},
+		observableGauges: map[string]otelmetric.Int64ObservableGauge{},
 	}
 
 	requestCounter, err := meter.Int64Counter(
@@ -88,7 +93,48 @@ func createMeasures(meter otelmetric.Meter) (*Measurements, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create operation planning time measure: %w", err)
 	}
+
 	h.histograms[OperationPlanningTime] = operationPlanningTime
+
+	schemaFieldUsage, err := meter.Int64Counter(
+		SchemaFieldUsageCounter,
+		SchemaFieldUsageCounterOptions...,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create schema usage counter: %w", err)
+	}
+
+	h.counters[SchemaFieldUsageCounter] = schemaFieldUsage
+
+	routerInfo, err := meter.Int64ObservableGauge(
+		RouterInfo,
+		RouterInfoOptions...,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create router info: %w", err)
+	}
+	h.observableGauges[RouterInfo] = routerInfo
+
+	if opts.EnableCircuitBreaker {
+		// We use 1 and 0 to represent a boolean state
+		circuitBreakerState, err := meter.Int64Gauge(
+			CircuitBreakerStateGauge,
+			CircuitBreakerStateInfoOptions...,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create circuit breaker state: %w", err)
+		}
+		h.gauges[CircuitBreakerStateGauge] = circuitBreakerState
+
+		circuitBreakerShortCircuits, err := meter.Int64Counter(
+			CircuitBreakerShortCircuitsCounter,
+			CircuitBreakerShortCircuitOptions...,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create circuit breaker short circuits: %w", err)
+		}
+		h.counters[CircuitBreakerShortCircuitsCounter] = circuitBreakerShortCircuits
+	}
 
 	return h, nil
 }

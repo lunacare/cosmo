@@ -35,6 +35,18 @@
         "Enabled": false,
         "HeaderName": "x-wg-trace-id"
       },
+      "Attributes": [
+        {
+          "Key": "wg.tracing.custom.conn.subgraph.hostport",
+          "Default": "",
+          "ValueFrom": {
+            "RequestHeader": "",
+            "ContextField": "",
+            "ResponseHeader": "",
+            "Expression": "subgraph.name"
+          }
+        }
+      ],
       "ExportGraphQLVariables": true,
       "WithNewRoot": false
     },
@@ -44,9 +56,11 @@
         "Enabled": true,
         "RouterRuntime": true,
         "GraphqlCache": true,
+        "ConnectionStats": true,
         "EngineStats": {
           "Subscriptions": true
         },
+        "CircuitBreaker": false,
         "ExcludeMetrics": null,
         "ExcludeMetricLabels": null,
         "Exporters": [
@@ -65,13 +79,20 @@
         "Path": "/metrics",
         "ListenAddr": "127.0.0.1:8088",
         "GraphqlCache": true,
+        "ConnectionStats": true,
         "EngineStats": {
           "Subscriptions": true
         },
+        "CircuitBreaker": false,
         "ExcludeMetrics": null,
         "ExcludeMetricLabels": null,
-        "ExcludeScopeInfo": true
-      }
+        "ExcludeScopeInfo": true,
+        "SchemaFieldUsage": {
+          "Enabled": true,
+          "IncludeOperationSha": false
+        }
+      },
+      "CardinalityLimit": 2000
     }
   },
   "GraphqlMetrics": {
@@ -126,6 +147,22 @@
       }
     ]
   },
+  "MCP": {
+    "Enabled": false,
+    "Server": {
+      "ListenAddr": "localhost:5025",
+      "BaseURL": "http://localhost:5025"
+    },
+    "Storage": {
+      "ProviderID": "mcp"
+    },
+    "GraphName": "cosmo",
+    "ExcludeMutations": false,
+    "EnableArbitraryOperations": false,
+    "ExposeSchema": false,
+    "RouterURL": "https://cosmo-router.wundergraph.com"
+  },
+  "DemoMode": true,
   "Modules": {
     "myModule": {
       "value": 1
@@ -137,63 +174,86 @@
         {
           "Operation": "propagate",
           "Matching": "",
+          "NegateMatch": false,
           "Named": "X-Test-Header",
           "Rename": "",
           "Default": "",
           "Name": "",
           "Value": "",
+          "Expression": "",
           "ValueFrom": null
         },
         {
           "Operation": "propagate",
           "Matching": "(?i)^X-Custom-.*",
+          "NegateMatch": false,
           "Named": "",
           "Rename": "",
           "Default": "",
           "Name": "",
           "Value": "",
+          "Expression": "",
           "ValueFrom": null
         },
         {
           "Operation": "propagate",
           "Matching": "",
+          "NegateMatch": false,
           "Named": "X-User-Id",
           "Rename": "",
           "Default": "123",
           "Name": "",
           "Value": "",
+          "Expression": "",
           "ValueFrom": null
         },
         {
           "Operation": "set",
           "Matching": "",
+          "NegateMatch": false,
           "Named": "",
           "Rename": "",
           "Default": "",
           "Name": "X-API-Key",
           "Value": "some-secret",
+          "Expression": "",
           "ValueFrom": null
         },
         {
           "Operation": "set",
           "Matching": "",
+          "NegateMatch": false,
           "Named": "",
           "Rename": "",
           "Default": "",
           "Name": "x-operation-name",
           "Value": "",
+          "Expression": "",
           "ValueFrom": {
             "RequestHeader": "",
             "ContextField": "operation_name",
             "ResponseHeader": "",
             "Expression": ""
           }
+        },
+        {
+          "Operation": "set",
+          "Matching": "",
+          "NegateMatch": false,
+          "Named": "",
+          "Rename": "",
+          "Default": "",
+          "Name": "x-expression-header",
+          "Value": "",
+          "Expression": "request.header.Get('X-Operation-Name')",
+          "ValueFrom": null
         }
       ],
       "Response": [
         {
           "Operation": "propagate",
           "Matching": "",
+          "NegateMatch": false,
           "Named": "X-Custom-Header",
           "Rename": "",
           "Default": "",
@@ -209,11 +269,13 @@
           {
             "Operation": "propagate",
             "Matching": "",
+            "NegateMatch": false,
             "Named": "Subgraph-Secret",
             "Rename": "",
             "Default": "some-secret",
             "Name": "",
             "Value": "",
+            "Expression": "",
             "ValueFrom": null
           }
         ],
@@ -221,6 +283,7 @@
           {
             "Operation": "set",
             "Matching": "",
+            "NegateMatch": false,
             "Named": "",
             "Rename": "",
             "Default": "",
@@ -244,6 +307,18 @@
         "MaxAttempts": 5,
         "MaxDuration": 10000000000,
         "Interval": 3000000000
+      },
+      "CircuitBreaker": {
+        "Enabled": false,
+        "ErrorThresholdPercentage": 50,
+        "RequestThreshold": 20,
+        "SleepWindow": 5000000000,
+        "HalfOpenAttempts": 1,
+        "RequiredSuccessfulAttempts": 1,
+        "RollingDuration": 10000000000,
+        "NumBuckets": 10,
+        "ExecutionTimeout": 60000000000,
+        "MaxConcurrentRequests": -1
       },
       "RequestTimeout": 60000000000,
       "DialTimeout": 30000000000,
@@ -269,6 +344,18 @@
           "MaxAttempts": 0,
           "MaxDuration": 0,
           "Interval": 0
+        },
+        "CircuitBreaker": {
+          "Enabled": false,
+          "ErrorThresholdPercentage": 0,
+          "RequestThreshold": 0,
+          "SleepWindow": 0,
+          "HalfOpenAttempts": 0,
+          "RequiredSuccessfulAttempts": 0,
+          "RollingDuration": 0,
+          "NumBuckets": 0,
+          "ExecutionTimeout": 0,
+          "MaxConcurrentRequests": 0
         },
         "RequestTimeout": 120000000000,
         "DialTimeout": null,
@@ -343,6 +430,12 @@
         }
       ]
     }
+  },
+  "Batching": {
+    "Enabled": false,
+    "MaxConcurrency": 10,
+    "MaxEntriesPerBatch": 100,
+    "OmitExtensions": false
   },
   "ListenAddr": "localhost:3002",
   "ControlplaneURL": "https://cosmo-cp.wundergraph.com",
@@ -474,11 +567,26 @@
             "SASLPlain": {
               "Password": "admin",
               "Username": "admin"
+            },
+            "SASLSCRAM": {
+              "Password": null,
+              "Username": null,
+              "Mechanism": null
             }
           },
           "TLS": {
             "Enabled": true
-          }
+          },
+          "FetchMaxWait": 10000000
+        }
+      ],
+      "Redis": [
+        {
+          "ID": "my-redis",
+          "URLs": [
+            "redis://localhost:6379/11"
+          ],
+          "ClusterEnabled": true
         }
       ]
     }
@@ -577,6 +685,10 @@
     "WebSocketClientPollTimeout": 1000000000,
     "WebSocketClientConnBufferSize": 128,
     "WebSocketClientReadTimeout": 5000000000,
+    "WebSocketClientWriteTimeout": 10000000000,
+    "WebSocketClientPingInterval": 10000000000,
+    "WebSocketClientPingTimeout": 30000000000,
+    "WebSocketClientFrameTimeout": 100000000,
     "ExecutionPlanCacheSize": 1024,
     "MinifySubgraphOperations": true,
     "EnablePersistedOperationsCache": true,
@@ -586,6 +698,7 @@
     "ParseKitPoolSize": 16,
     "EnableValidationCache": true,
     "ValidationCacheSize": 1024,
+    "DisableExposingVariablesContentOnValidationError": false,
     "ResolverMaxRecyclableParserSize": 4096,
     "EnableSubgraphFetchOperationName": true,
     "DisableVariablesRemapping": false,
@@ -619,19 +732,31 @@
           "HeaderKey": "Authorization"
         }
       }
+    },
+    "ClientInfoFromInitialPayload": {
+      "Enabled": true,
+      "NameField": "graphql-client-name",
+      "VersionField": "graphql-client-version",
+      "ForwardToRequestHeaders": {
+        "Enabled": true,
+        "NameTargetHeader": "graphql-client-name",
+        "VersionTargetHeader": "graphql-client-version"
+      }
     }
   },
   "SubgraphErrorPropagation": {
     "Enabled": true,
     "PropagateStatusCodes": false,
-    "Mode": "wrapped",
+    "Mode": "pass-through",
     "RewritePaths": true,
     "OmitLocations": true,
-    "OmitExtensions": false,
+    "OmitExtensions": true,
     "AttachServiceName": true,
     "DefaultExtensionCode": "DOWNSTREAM_SERVICE_ERROR",
+    "AllowAllExtensionFields": true,
     "AllowedExtensionFields": [
-      "code"
+      "field1",
+      "field2"
     ],
     "AllowedFields": null
   },
@@ -657,6 +782,12 @@
         ],
         "ClusterEnabled": false
       }
+    ],
+    "FileSystem": [
+      {
+        "ID": "mcp",
+        "Path": "operations"
+      }
     ]
   },
   "ExecutionConfig": {
@@ -676,6 +807,7 @@
     }
   },
   "PersistedOperationsConfig": {
+    "Disabled": false,
     "LogUnknown": true,
     "Safelist": {
       "Enabled": true
@@ -711,7 +843,7 @@
       "Enabled": false
     },
     "ReplaceUndefinedOpFieldErrors": {
-      "Enabled": false
+      "Enabled": true
     },
     "ReplaceInvalidVarErrors": {
       "Enabled": false
@@ -721,6 +853,9 @@
     },
     "SubscriptionMultipartPrintBoundary": {
       "Enabled": false
+    },
+    "UseGraphQLValidationFailedStatus": {
+      "Enabled": true
     }
   },
   "ApolloRouterCompatibilityFlags": {
@@ -734,5 +869,17 @@
   "ClientHeader": {
     "Name": "Client-Name",
     "Version": "Client_Version"
+  },
+  "Plugins": {
+    "Enabled": true,
+    "Path": "some/path/to/plugins"
+  },
+  "WatchConfig": {
+    "Enabled": true,
+    "Interval": 10000000000,
+    "StartupDelay": {
+      "Enabled": true,
+      "Maximum": 10000000000
+    }
   }
 }

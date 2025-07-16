@@ -8,6 +8,8 @@ import { OrganizationRepository } from '../../repositories/OrganizationRepositor
 import { UserRepository } from '../../repositories/UserRepository.js';
 import type { RouterOptions } from '../../routes.js';
 import { enrichLogger, getLogger, handleError } from '../../util.js';
+import { OrganizationGroupRepository } from '../../repositories/OrganizationGroupRepository.js';
+import { UnauthorizedError } from '../../errors/errors.js';
 
 export function inviteUser(
   opts: RouterOptions,
@@ -22,16 +24,12 @@ export function inviteUser(
 
     const userRepo = new UserRepository(logger, opts.db);
     const orgRepo = new OrganizationRepository(logger, opts.db, opts.billingDefaultPlanId);
+    const orgGroupRepo = new OrganizationGroupRepository(opts.db);
     const orgInvitationRepo = new OrganizationInvitationRepository(logger, opts.db, opts.billingDefaultPlanId);
     const auditLogRepo = new AuditLogRepository(opts.db);
 
-    if (!authContext.hasWriteAccess) {
-      return {
-        response: {
-          code: EnumStatusCode.ERR,
-          details: `The user doesnt have the permissions to perform this operation`,
-        },
-      };
+    if (authContext.organizationDeactivated || !authContext.rbac.isOrganizationAdminOrDeveloper) {
+      throw new UnauthorizedError();
     }
 
     const organization = await orgRepo.byId(authContext.organizationId);
@@ -45,7 +43,6 @@ export function inviteUser(
     }
 
     const memberCount = await orgRepo.memberCount(authContext.organizationId);
-
     const usersFeature = await orgRepo.getFeature({
       organizationId: authContext.organizationId,
       featureId: 'users',
@@ -84,6 +81,25 @@ export function inviteUser(
     }
 
     const user = await userRepo.byId(keycloakUserID!);
+
+    const groups: string[] = [];
+    for (const groupId of req.groups) {
+      const group = await orgGroupRepo.byId({
+        organizationId: authContext.organizationId,
+        groupId,
+      });
+
+      if (!group) {
+        return {
+          response: {
+            code: EnumStatusCode.ERR_NOT_FOUND,
+            details: 'Group not found',
+          },
+        };
+      }
+
+      groups.push(group.groupId);
+    }
 
     if (user) {
       const orgMember = await orgRepo.getOrganizationMember({
@@ -128,6 +144,7 @@ export function inviteUser(
 
         await auditLogRepo.addAuditLog({
           organizationId: authContext.organizationId,
+          organizationSlug: organization.slug,
           auditAction: 'organization_invitation.created',
           action: 'created',
           actorId: authContext.userId,
@@ -145,6 +162,16 @@ export function inviteUser(
           },
         };
       }
+    }
+
+    // We don't need the group when re-inviting a member
+    if (groups.length === 0) {
+      return {
+        response: {
+          code: EnumStatusCode.ERR_NOT_FOUND,
+          details: 'No group was provided',
+        },
+      };
     }
 
     const userMemberships = await orgRepo.memberships({ userId: keycloakUserID! });
@@ -174,10 +201,12 @@ export function inviteUser(
       organizationId: authContext.organizationId,
       dbUser: user,
       inviterUserId: authContext.userId,
+      groups,
     });
 
     await auditLogRepo.addAuditLog({
       organizationId: authContext.organizationId,
+      organizationSlug: organization.slug,
       auditAction: 'organization_invitation.created',
       action: 'created',
       actorId: authContext.userId,

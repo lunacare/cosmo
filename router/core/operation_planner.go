@@ -19,7 +19,7 @@ import (
 type planWithMetaData struct {
 	preparedPlan                      plan.Plan
 	operationDocument, schemaDocument *ast.Document
-	typeFieldUsageInfo                []*graphqlmetricsv1.TypeFieldUsageInfo
+	typeFieldUsageInfo                []*graphqlschemausage.TypeFieldUsageInfo
 	argumentUsageInfo                 []*graphqlmetricsv1.ArgumentUsageInfo
 }
 
@@ -157,5 +157,6 @@ func (p *OperationPlanner) plan(opContext *operationContext, options PlanOptions
 			return err
 		}
 	}
+
 	return nil
 }

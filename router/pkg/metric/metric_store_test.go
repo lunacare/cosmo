@@ -131,10 +131,14 @@ func createTestStore(t *testing.T, limit int, metricReader *metric.ManualReader)
 
 	prom := metric.NewMeterProvider(metric.WithReader(promExporter))
 
-	store, err := NewStore(
+	opts := MetricOpts{
+		EnableCircuitBreaker: true,
+	}
+	store, err := NewStore(opts, opts,
 		WithCardinalityLimit(limit),
 		WithOtlpMeterProvider(mp),
 		WithPromMeterProvider(prom),
+		WithRouterInfoAttributes(otelmetric.WithAttributeSet(attribute.NewSet())),
 	)
 
 	require.NoError(t, err)

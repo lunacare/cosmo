@@ -2,34 +2,31 @@ package core
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/expr-lang/expr/vm"
+	rcontext "github.com/wundergraph/cosmo/router/internal/context"
+
 	"go.opentelemetry.io/otel/attribute"
 	"go.uber.org/zap"
 
 	"github.com/wundergraph/astjson"
 
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/engine/datasource/httpclient"
+	"github.com/wundergraph/graphql-go-tools/v2/pkg/engine/plan"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/engine/resolve"
 
 	graphqlmetrics "github.com/wundergraph/cosmo/router/gen/proto/wg/cosmo/graphqlmetrics/v1"
 	"github.com/wundergraph/cosmo/router/internal/expr"
 	"github.com/wundergraph/cosmo/router/pkg/authentication"
 	"github.com/wundergraph/cosmo/router/pkg/config"
+	"github.com/wundergraph/cosmo/router/pkg/graphqlschemausage"
 	ctrace "github.com/wundergraph/cosmo/router/pkg/trace"
-)
-
-type contextKey int
-
-const (
-	requestContextKey contextKey = iota
-	subgraphResolverContextKey
-	engineLoaderHooksContextKey
 )
 
 var _ RequestContext = (*requestContext)(nil)
@@ -51,9 +48,8 @@ type ClientInfo struct {
 }
 
 func NewClientInfoFromRequest(r *http.Request, clientHeader config.ClientHeader) *ClientInfo {
-	clientName := ctrace.GetClientHeader(r.Header, []string{clientHeader.Name, "graphql-client-name", "apollographql-client-name"}, "unknown")
-	clientVersion := ctrace.GetClientHeader(r.Header, []string{clientHeader.Version, "graphql-client-version", "apollographql-client-version"}, "missing")
 	requestToken := r.Header.Get("X-WG-Token")
+	clientName, clientVersion := ctrace.GetClientDetails(r, clientHeader)
 	return &ClientInfo{
 		Name:           clientName,
 		Version:        clientVersion,
@@ -134,6 +130,9 @@ type RequestContext interface {
 	// SetAuthenticationScopes sets the scopes for the request on Authentication
 	// If Authentication is not set, it will be initialized with the scopes
 	SetAuthenticationScopes(scopes []string)
+	// SetCustomFieldValueRenderer overrides the default field value rendering behavior
+	// This can be used, e.g. to obfuscate sensitive data in the response
+	SetCustomFieldValueRenderer(renderer resolve.FieldValueRenderer)
 }
 
 var metricAttrsPool = sync.Pool{
@@ -158,10 +157,11 @@ type requestTelemetryAttributes struct {
 	// It will also remap the key if configured.
 	mapper *attributeMapper
 	// traceAttributeExpressions is a map of expressions that can be used to resolve dynamic attributes in traces
-	traceAttributeExpressions *attributeExpressions
+	telemetryAttributeExpressions *attributeExpressions
 	// metricAttributeExpressions is a map of expressions that can be used to resolve dynamic attributes in metrics
 	metricAttributeExpressions *attributeExpressions
-
+	// traceAttributeExpressions is a map of expressions that can be used to resolve dynamic attributes in traces
+	tracingAttributeExpressions *attributeExpressions
 	// metricsEnabled indicates if metrics are enabled. If false, no metrics attributes will be added
 	metricsEnabled bool
 	// traceEnabled indicates if traces are enabled, if false, no trace attributes will be added
@@ -260,30 +260,17 @@ type requestContext struct {
 	telemetry *requestTelemetryAttributes
 	// expressionContext is the context that will be provided to a compiled expression in order to retrieve data via dynamic expressions
 	expressionContext expr.Context
+	// customFieldValueRenderer is used to override the default field value rendering behavior
+	customFieldValueRenderer resolve.FieldValueRenderer
+}
+
+func (c *requestContext) SetCustomFieldValueRenderer(renderer resolve.FieldValueRenderer) {
+	c.customFieldValueRenderer = renderer
 }
 
 func (c *requestContext) SetError(err error) {
 	c.error = err
 	c.expressionContext.Request.Error = err
-}
-
-func (c *requestContext) ResolveAnyExpressionWithWrappedError(expression *vm.Program) (any, error) {
-	// If an error exists already, wrap it and resolve the expression with the copied context
-	if c.expressionContext.Request.Error != nil {
-		// This will create a copy of the base expressionContext which we can modify
-		copyContext := c.expressionContext
-		copyContext.Request.Error = &ExprWrapError{c.expressionContext.Request.Error}
-		return expr.ResolveAnyExpression(expression, copyContext)
-	}
-	return expr.ResolveAnyExpression(expression, c.expressionContext)
-}
-
-func (c *requestContext) ResolveStringExpression(expression *vm.Program) (string, error) {
-	return expr.ResolveStringExpression(expression, c.expressionContext)
-}
-
-func (c *requestContext) ResolveBoolExpression(expression *vm.Program) (bool, error) {
-	return expr.ResolveBoolExpression(expression, c.expressionContext)
 }
 
 func (c *requestContext) Operation() OperationContext {
@@ -295,14 +282,14 @@ func (c *requestContext) Request() *http.Request {
 }
 
 func withRequestContext(ctx context.Context, operation *requestContext) context.Context {
-	return context.WithValue(ctx, requestContextKey, operation)
+	return context.WithValue(ctx, rcontext.RequestContextKey, operation)
 }
 
 func getRequestContext(ctx context.Context) *requestContext {
 	if ctx == nil {
 		return nil
 	}
-	op := ctx.Value(requestContextKey)
+	op := ctx.Value(rcontext.RequestContextKey)
 	if op == nil {
 		return nil
 	}
@@ -483,8 +470,14 @@ type OperationContext interface {
 	Hash() uint64
 	// Content is the content of the operation
 	Content() string
+	// Variables is the variables of the operation
+	Variables() *astjson.Value
 	// ClientInfo returns information about the client that initiated this operation
 	ClientInfo() ClientInfo
+	// QueryPlanStats returns some statistics about the query plan for the operation
+	// if called too early in request chain, it may be inaccurate for modules, using
+	// in Middleware is recommended
+	QueryPlanStats() (QueryPlanStats, error)
 }
 
 var _ OperationContext = (*operationContext)(nil)
@@ -532,7 +525,7 @@ type operationContext struct {
 	persistedOperationCacheHit bool
 	normalizationCacheHit      bool
 
-	typeFieldUsageInfo []*graphqlmetrics.TypeFieldUsageInfo
+	typeFieldUsageInfo graphqlschemausage.TypeFieldMetrics
 	argumentUsageInfo  []*graphqlmetrics.ArgumentUsageInfo
 	inputUsageInfo     []*graphqlmetrics.InputUsageInfo
 
@@ -562,6 +555,10 @@ func (o *operationContext) Hash() uint64 {
 	return o.hash
 }
 
+func (o *operationContext) HashString() string {
+	return strconv.FormatUint(o.hash, 10)
+}
+
 func (o *operationContext) Content() string {
 	return o.content
 }
@@ -576,6 +573,65 @@ func (o *operationContext) Protocol() OperationProtocol {
 
 func (o *operationContext) ClientInfo() ClientInfo {
 	return *o.clientInfo
+}
+
+type QueryPlanStats struct {
+	TotalSubgraphFetches int
+	SubgraphFetches      map[string]int
+}
+
+func (p *QueryPlanStats) analyzePlanNode(plan *resolve.FetchTreeQueryPlanNode) {
+	switch plan.Kind {
+	case resolve.FetchTreeNodeKindSingle:
+		p.analyzeSingleFetch(plan)
+	case resolve.FetchTreeNodeKindSequence, resolve.FetchTreeNodeKindParallel:
+		for _, child := range plan.Children {
+			p.analyzePlanNode(child)
+		}
+	}
+}
+
+func (p *QueryPlanStats) analyzeSingleFetch(plan *resolve.FetchTreeQueryPlanNode) {
+	key := plan.Fetch.SubgraphName
+
+	p.TotalSubgraphFetches++
+
+	if entry, ok := p.SubgraphFetches[key]; ok {
+		p.SubgraphFetches[key] = entry + 1
+	} else {
+		p.SubgraphFetches[key] = 1
+	}
+}
+
+func (o *operationContext) QueryPlanStats() (QueryPlanStats, error) {
+	if o == nil || o.preparedPlan == nil || o.preparedPlan.preparedPlan == nil {
+		return QueryPlanStats{}, errors.New("operation context is nil")
+	}
+
+	if o.preparedPlan == nil || o.preparedPlan.preparedPlan == nil {
+		return QueryPlanStats{}, errors.New("prepared plan is nil")
+	}
+
+	qps := QueryPlanStats{
+		TotalSubgraphFetches: 0,
+		SubgraphFetches:      make(map[string]int),
+	}
+
+	if p, ok := o.preparedPlan.preparedPlan.(*plan.SynchronousResponsePlan); ok {
+		if p.Response == nil {
+			return QueryPlanStats{}, errors.New("synchronous response plan is nil")
+		}
+
+		if p.Response.Fetches == nil {
+			return QueryPlanStats{}, errors.New("synchronous response plan has no fetches")
+		}
+
+		qps.analyzePlanNode(p.Response.Fetches.QueryPlan())
+	} else {
+		return QueryPlanStats{}, errors.New("query plan stats currently only support synchronous response plans")
+	}
+
+	return qps, nil
 }
 
 // isMutationRequest returns true if the current request is a mutation request
@@ -604,6 +660,8 @@ func NewSubgraphResolver(subgraphs []Subgraph) *SubgraphResolver {
 			Url:       subgraphs[i].Url,
 			UrlString: subgraphs[i].UrlString,
 		}
+		// TODO: In case there are multiple subgraphs with the same URL, the previous
+		// one will be overwritten. To investigate if this causes an issue.
 		if sg.UrlString != "" {
 			resolver.subgraphsByURL[sg.UrlString] = &sg
 		}
@@ -631,11 +689,11 @@ func (s *SubgraphResolver) BySubgraphURL(u string) *Subgraph {
 }
 
 func withSubgraphResolver(ctx context.Context, resolver *SubgraphResolver) context.Context {
-	return context.WithValue(ctx, subgraphResolverContextKey, resolver)
+	return context.WithValue(ctx, rcontext.SubgraphResolverContextKey, resolver)
 }
 
 func subgraphResolverFromContext(ctx context.Context) *SubgraphResolver {
-	resolver, _ := ctx.Value(subgraphResolverContextKey).(*SubgraphResolver)
+	resolver, _ := ctx.Value(rcontext.SubgraphResolverContextKey).(*SubgraphResolver)
 	return resolver
 }
 
@@ -648,6 +706,7 @@ type requestContextOptions struct {
 	mapper                        *attributeMapper
 	metricAttributeExpressions    *attributeExpressions
 	telemetryAttributeExpressions *attributeExpressions
+	tracingAttributeExpressions   *attributeExpressions
 	w                             http.ResponseWriter
 	r                             *http.Request
 }
@@ -665,12 +724,13 @@ func buildRequestContext(opts requestContextOptions) *requestContext {
 		request:        opts.r,
 		operation:      opts.operationContext,
 		telemetry: &requestTelemetryAttributes{
-			metricSetAttrs:             opts.metricSetAttributes,
-			metricsEnabled:             opts.metricsEnabled,
-			traceEnabled:               opts.traceEnabled,
-			mapper:                     opts.mapper,
-			traceAttributeExpressions:  opts.telemetryAttributeExpressions,
-			metricAttributeExpressions: opts.metricAttributeExpressions,
+			metricSetAttrs:                opts.metricSetAttributes,
+			metricsEnabled:                opts.metricsEnabled,
+			traceEnabled:                  opts.traceEnabled,
+			mapper:                        opts.mapper,
+			telemetryAttributeExpressions: opts.telemetryAttributeExpressions,
+			metricAttributeExpressions:    opts.metricAttributeExpressions,
+			tracingAttributeExpressions:   opts.tracingAttributeExpressions,
 		},
 		expressionContext: rootCtx,
 		subgraphResolver:  subgraphResolverFromContext(opts.r.Context()),

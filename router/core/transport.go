@@ -2,13 +2,19 @@ package core
 
 import (
 	"bytes"
+	"context"
 	"fmt"
+	"github.com/wundergraph/cosmo/router/internal/circuit"
 	"io"
 	"net/http"
 	"net/url"
 	"sort"
 	"strconv"
 	"sync"
+	"time"
+
+	"github.com/wundergraph/cosmo/router/internal/expr"
+	"github.com/wundergraph/cosmo/router/internal/traceclient"
 
 	"go.opentelemetry.io/otel/propagation"
 
@@ -58,20 +64,47 @@ type sfCacheItem struct {
 }
 
 func NewCustomTransport(
-	logger *zap.Logger,
-	roundTripper http.RoundTripper,
+	baseRoundTripper http.RoundTripper,
 	retryOptions retrytransport.RetryOptions,
 	metricStore metric.Store,
+	connectionMetricStore metric.ConnectionMetricStore,
 	enableSingleFlight bool,
+	breaker *circuit.Manager,
+	enableTraceClient bool,
 ) *CustomTransport {
 	ct := &CustomTransport{
 		metricStore: metricStore,
 	}
 
+	// The round trip method is almost always called via the http.Client roundTripper interface
+	// as a result we cannot pass in the request context logger directly, since this will break the interface
+	// The roundTripper is also not in the core package so it does not have access to the
+	// getRequestContext function since its private to only the core package
+	// As a workaround we pass in a function that can be used to get the logger from within the round tripper
+	getRequestContextLogger := func(req *http.Request) *zap.Logger {
+		reqContext := getRequestContext(req.Context())
+		return reqContext.Logger()
+	}
+
+	if enableTraceClient {
+		getExprContext := func(ctx context.Context) *expr.Context {
+			reqContext := getRequestContext(ctx)
+			if reqContext == nil {
+				return &expr.Context{}
+			}
+			return &reqContext.expressionContext
+		}
+		baseRoundTripper = traceclient.NewTraceInjectingRoundTripper(baseRoundTripper, connectionMetricStore, getExprContext)
+	}
+
+	if breaker.HasCircuits() {
+		baseRoundTripper = circuit.NewCircuitTripper(baseRoundTripper, breaker, getRequestContextLogger)
+	}
+
 	if retryOptions.Enabled {
-		ct.roundTripper = retrytransport.NewRetryHTTPTransport(roundTripper, retryOptions, logger)
+		ct.roundTripper = retrytransport.NewRetryHTTPTransport(baseRoundTripper, retryOptions, getRequestContextLogger)
 	} else {
-		ct.roundTripper = roundTripper
+		ct.roundTripper = baseRoundTripper
 	}
 	if enableSingleFlight {
 		ct.sf = make(map[uint64]*sfCacheItem)
@@ -96,7 +129,7 @@ func (ct *CustomTransport) measureSubgraphMetrics(req *http.Request) func(err er
 
 	attributes = append(attributes, reqContext.telemetry.metricAttrs...)
 	if reqContext.telemetry.metricAttributeExpressions != nil {
-		additionalAttrs, err := reqContext.telemetry.metricAttributeExpressions.expressionsAttributes(reqContext)
+		additionalAttrs, err := reqContext.telemetry.metricAttributeExpressions.expressionsAttributes(&reqContext.expressionContext)
 		if err != nil {
 			ct.logger.Error("failed to resolve metric attribute expressions", zap.Error(err))
 		}
@@ -305,14 +338,15 @@ func (ct *CustomTransport) singleFlightKey(req *http.Request) uint64 {
 type TransportFactory struct {
 	preHandlers                   []TransportPreHandler
 	postHandlers                  []TransportPostHandler
-	subgraphTransportOptions      *SubgraphTransportOptions
 	retryOptions                  retrytransport.RetryOptions
 	localhostFallbackInsideDocker bool
 	metricStore                   metric.Store
+	connectionMetricStore         metric.ConnectionMetricStore
+	circuitBreaker                *circuit.Manager
 	logger                        *zap.Logger
 	tracerProvider                *sdktrace.TracerProvider
 	tracePropagators              propagation.TextMapPropagator
-	proxy                         ProxyFunc
+	enableTraceClient             bool
 }
 
 var _ ApiTransportFactory = TransportFactory{}
@@ -321,13 +355,22 @@ type TransportOptions struct {
 	PreHandlers                   []TransportPreHandler
 	PostHandlers                  []TransportPostHandler
 	SubgraphTransportOptions      *SubgraphTransportOptions
-	Proxy                         ProxyFunc
 	RetryOptions                  retrytransport.RetryOptions
 	LocalhostFallbackInsideDocker bool
 	MetricStore                   metric.Store
+	ConnectionMetricStore         metric.ConnectionMetricStore
+	CircuitBreaker                *circuit.Manager
 	Logger                        *zap.Logger
 	TracerProvider                *sdktrace.TracerProvider
 	TracePropagators              propagation.TextMapPropagator
+	EnableTraceClient             bool
+}
+
+type SubscriptionClientOptions struct {
+	PingInterval time.Duration
+	PingTimeout  time.Duration
+	ReadTimeout  time.Duration
+	FrameTimeout time.Duration
 }
 
 func NewTransport(opts *TransportOptions) *TransportFactory {
@@ -335,21 +378,18 @@ func NewTransport(opts *TransportOptions) *TransportFactory {
 		preHandlers:                   opts.PreHandlers,
 		postHandlers:                  opts.PostHandlers,
 		retryOptions:                  opts.RetryOptions,
-		subgraphTransportOptions:      opts.SubgraphTransportOptions,
 		localhostFallbackInsideDocker: opts.LocalhostFallbackInsideDocker,
 		metricStore:                   opts.MetricStore,
+		connectionMetricStore:         opts.ConnectionMetricStore,
 		logger:                        opts.Logger,
 		tracerProvider:                opts.TracerProvider,
-		proxy:                         opts.Proxy,
 		tracePropagators:              opts.TracePropagators,
+		circuitBreaker:                opts.CircuitBreaker,
+		enableTraceClient:             opts.EnableTraceClient,
 	}
 }
 
 func (t TransportFactory) RoundTripper(enableSingleFlight bool, baseTransport http.RoundTripper) http.RoundTripper {
-	if t.subgraphTransportOptions != nil && t.subgraphTransportOptions.SubgraphMap != nil && len(t.subgraphTransportOptions.SubgraphMap) > 0 {
-		baseTransport = NewSubgraphTransport(t.subgraphTransportOptions, baseTransport, t.logger, t.proxy)
-	}
-
 	if t.localhostFallbackInsideDocker && docker.Inside() {
 		baseTransport = docker.NewLocalhostFallbackRoundTripper(baseTransport)
 	}
@@ -385,11 +425,13 @@ func (t TransportFactory) RoundTripper(enableSingleFlight bool, baseTransport ht
 		}),
 	)
 	tp := NewCustomTransport(
-		t.logger,
 		traceTransport,
 		t.retryOptions,
 		t.metricStore,
+		t.connectionMetricStore,
 		enableSingleFlight,
+		t.circuitBreaker,
+		t.enableTraceClient,
 	)
 
 	tp.preHandlers = t.preHandlers

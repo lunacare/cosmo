@@ -39,16 +39,29 @@ import { AIGraphReadmeQueue } from '../src/core/workers/AIGraphReadmeWorker.js';
 import { DeleteOrganizationQueue } from '../src/core/workers/DeleteOrganizationWorker.js';
 import * as schema from '../src/db/schema.js';
 import { FeatureIds, Label } from '../src/types/index.js';
-import { NewBillingPlan } from '../src/db/models.js';
+import { NewBillingPlan, OrganizationRole } from '../src/db/models.js';
 import { DeactivateOrganizationQueue } from '../src/core/workers/DeactivateOrganizationWorker.js';
 import { DeleteUserQueue } from '../src/core/workers/DeleteUserQueue.js';
 import { ReactivateOrganizationQueue } from '../src/core/workers/ReactivateOrganizationWorker.js';
+import { DeleteOrganizationAuditLogsQueue } from '../src/core/workers/DeleteOrganizationAuditLogsWorker.js';
 
 export const DEFAULT_ROUTER_URL = 'http://localhost:3002';
 export const DEFAULT_SUBGRAPH_URL_ONE = 'http://localhost:4001';
 export const DEFAULT_SUBGRAPH_URL_TWO = 'http://localhost:4002';
 export const DEFAULT_SUBGRAPH_URL_THREE = 'http://localhost:4003';
 export const DEFAULT_NAMESPACE = 'default';
+
+const getKeycloakGroups = async (realm: string, keycloak: Keycloak, groupId: string | undefined) => {
+  if (!groupId) {
+    return [];
+  }
+
+  const subgroups = await keycloak.fetchAllSubGroups({ realm, kcGroupId: groupId });
+  return subgroups.map((group) => ({
+    id: group.id!,
+    name: group.name!,
+  }));
+};
 
 export const SetupTest = async function ({
   dbname,
@@ -90,8 +103,11 @@ export const SetupTest = async function ({
 
   if (enableMultiUsers) {
     users.adminBobCompanyA = createTestContext('company-a', companyAOrganizationId);
-    users.devJoeCompanyA = createTestContext('company-a', companyAOrganizationId, false, true, ['developer']);
-    users.viewerTimCompanyA = createTestContext('company-a', companyAOrganizationId, false, false, ['viewer']);
+    users.devJoeCompanyA = createTestContext('company-a', companyAOrganizationId, ['organization-developer']);
+    users.keyManagerSmithCompanyA = createTestContext('company-a', companyAOrganizationId, [
+      'organization-apikey-manager',
+    ]);
+    users.viewerTimCompanyA = createTestContext('company-a', companyAOrganizationId, ['organization-viewer']);
     users.adminJimCompanyB = createTestContext('company-b', randomUUID());
   }
 
@@ -111,6 +127,7 @@ export const SetupTest = async function ({
     clientId,
     adminUser,
     adminPassword,
+    logger: log,
   });
 
   const platformWebhooks = new MockPlatformWebhookService();
@@ -130,6 +147,7 @@ export const SetupTest = async function ({
 
   const readmeQueue = new AIGraphReadmeQueue(log, server.redisForQueue);
   const deleteOrganizationQueue = new DeleteOrganizationQueue(log, server.redisForQueue);
+  const deleteOrganizationAuditLogsQueue = new DeleteOrganizationAuditLogsQueue(log, server.redisForQueue);
   const deactivateOrganizationQueue = new DeactivateOrganizationQueue(log, server.redisForQueue);
   const deleteUserQueue = new DeleteUserQueue(log, server.redisForQueue);
   const reactivateOrganizationQueue = new ReactivateOrganizationQueue(log, server.redisForQueue);
@@ -159,6 +177,7 @@ export const SetupTest = async function ({
       queues: {
         readmeQueue,
         deleteOrganizationQueue,
+        deleteOrganizationAuditLogsQueue,
         deactivateOrganizationQueue,
         reactivateOrganizationQueue,
         deleteUserQueue,
@@ -188,7 +207,7 @@ export const SetupTest = async function ({
 
   const queryConnection = postgres(databaseConnectionUrl);
 
-  const id = await SetupKeycloak({
+  const [id, kcRootGroupId] = await SetupKeycloak({
     keycloakClient,
     realmName: realm,
     userTestData: {
@@ -198,15 +217,22 @@ export const SetupTest = async function ({
       organizationSlug: users.adminAliceCompanyA.organizationSlug,
       email: users.adminAliceCompanyA.email,
       apiKey: users.adminAliceCompanyA.apiKey,
-      roles: ['admin'],
+      roles: ['organization-admin'],
     },
   });
+
   users.adminAliceCompanyA.userId = id;
-  await seedTest(queryConnection, users.adminAliceCompanyA, createScimKey);
+  await seedTest(
+    queryConnection,
+    users.adminAliceCompanyA,
+    createScimKey,
+    kcRootGroupId,
+    await getKeycloakGroups(realm, keycloakClient, kcRootGroupId),
+  );
 
   if (enableMultiUsers) {
     if (users.adminBobCompanyA) {
-      const id = await addKeycloakUser({
+      const [id, rootGroupId] = await addKeycloakUser({
         keycloakClient,
         realmName: realm,
         userTestData: {
@@ -216,14 +242,21 @@ export const SetupTest = async function ({
           organizationSlug: users.adminBobCompanyA.organizationSlug,
           email: users.adminBobCompanyA.email,
           apiKey: users.adminBobCompanyA.apiKey,
-          roles: ['admin'],
+          roles: ['organization-admin'],
         },
       });
       users.adminBobCompanyA.userId = id;
-      await seedTest(queryConnection, users.adminBobCompanyA, createScimKey);
+      await seedTest(
+        queryConnection,
+        users.adminBobCompanyA,
+        createScimKey,
+        rootGroupId,
+        await getKeycloakGroups(realm, keycloakClient, rootGroupId),
+      );
     }
+
     if (users.devJoeCompanyA) {
-      const id = await addKeycloakUser({
+      const [id, rootGroupId] = await addKeycloakUser({
         keycloakClient,
         realmName: realm,
         userTestData: {
@@ -233,14 +266,21 @@ export const SetupTest = async function ({
           organizationSlug: users.devJoeCompanyA.organizationSlug,
           email: users.devJoeCompanyA.email,
           apiKey: users.devJoeCompanyA.apiKey,
-          roles: ['developer'],
+          roles: ['organization-developer'],
         },
       });
       users.devJoeCompanyA.userId = id;
-      await seedTest(queryConnection, users.devJoeCompanyA);
+      await seedTest(
+        queryConnection,
+        users.devJoeCompanyA,
+        undefined,
+        rootGroupId,
+        await getKeycloakGroups(realm, keycloakClient, rootGroupId),
+      );
     }
+
     if (users.viewerTimCompanyA) {
-      const id = await addKeycloakUser({
+      const [id, rootGroupId] = await addKeycloakUser({
         keycloakClient,
         realmName: realm,
         userTestData: {
@@ -250,14 +290,21 @@ export const SetupTest = async function ({
           organizationSlug: users.viewerTimCompanyA.organizationSlug,
           email: users.viewerTimCompanyA.email,
           apiKey: users.viewerTimCompanyA.apiKey,
-          roles: ['developer'],
+          roles: ['organization-developer'],
         },
       });
       users.viewerTimCompanyA.userId = id;
-      await seedTest(queryConnection, users.viewerTimCompanyA);
+      await seedTest(
+        queryConnection,
+        users.viewerTimCompanyA,
+        undefined,
+        rootGroupId,
+        await getKeycloakGroups(realm, keycloakClient, rootGroupId),
+      );
     }
+
     if (users.adminJimCompanyB) {
-      const id = await addKeycloakUser({
+      const [id, rootGroupId] = await addKeycloakUser({
         keycloakClient,
         realmName: realm,
         userTestData: {
@@ -267,11 +314,17 @@ export const SetupTest = async function ({
           organizationSlug: users.adminJimCompanyB.organizationSlug,
           email: users.adminJimCompanyB.email,
           apiKey: users.adminJimCompanyB.apiKey,
-          roles: ['admin'],
+          roles: ['organization-admin'],
         },
       });
       users.adminJimCompanyB.userId = id;
-      await seedTest(queryConnection, users.adminJimCompanyB, createScimKey);
+      await seedTest(
+        queryConnection,
+        users.adminJimCompanyB,
+        createScimKey,
+        rootGroupId,
+        await getKeycloakGroups(realm, keycloakClient, rootGroupId),
+      );
     }
   }
 
@@ -313,6 +366,30 @@ export const SetupTest = async function ({
   const transport = createConnectTransport({
     httpVersion: '1.1',
     baseUrl: addr,
+    interceptors: [
+      // Interceptor to handle cosmo-cli user-agent
+      (next) => (req) => {
+        // Check if x-cosmo-client header is set to cosmo-cli
+        const cosmoClient = req.header.get('x-cosmo-client');
+
+        if (cosmoClient === 'cosmo-cli') {
+          const modifiedHeaders = new Headers(req.header);
+          modifiedHeaders.set('user-agent', 'cosmo-cli');
+          // Remove the temporary header
+          modifiedHeaders.delete('x-cosmo-client');
+
+          const modifiedReq = {
+            ...req,
+            header: modifiedHeaders,
+          };
+
+          return next(modifiedReq);
+        }
+
+        // Otherwise, proceed normally
+        return next(req);
+      },
+    ],
   });
 
   const platformClient = createPromiseClient(PlatformService, transport);
@@ -331,6 +408,7 @@ export const SetupTest = async function ({
     queues: {
       readmeQueue,
       deleteOrganizationQueue,
+      deleteOrganizationAuditLogsQueue,
       deactivateOrganizationQueue,
       deleteUserQueue,
       reactivateOrganizationQueue,
@@ -363,14 +441,46 @@ export const SetupKeycloak = async ({
     }
   }
 
-  const id = await addKeycloakUser({
+  return addKeycloakUser({
     keycloakClient,
     userTestData,
     realmName,
   });
-
-  return id;
 };
+
+export async function createOrganizationGroup(
+  client: PromiseClient<typeof PlatformService>,
+  name: string,
+  ...rules: { role: OrganizationRole; namespaces?: string[]; resources?: string[] }[]
+) {
+  const createGroupResponse = await client.createOrganizationGroup({
+    name,
+    description: '',
+  });
+
+  expect(createGroupResponse.response?.code).toBe(EnumStatusCode.OK);
+  expect(createGroupResponse.group).toBeDefined();
+
+  if (rules.length === 0) {
+    // We don't need to update the group
+    return createGroupResponse.group!;
+  }
+
+  // Update the group with all the provided roles
+  const updateGroupResponse = await client.updateOrganizationGroup({
+    groupId: createGroupResponse.group!.groupId,
+    description: createGroupResponse.group!.description,
+    rules,
+  });
+
+  expect(updateGroupResponse.response?.code).toBe(EnumStatusCode.OK);
+
+  // Retrieve the group with the updated roles
+  const getGroupsResponse = await client.getOrganizationGroups({});
+  expect(getGroupsResponse.response?.code).toBe(EnumStatusCode.OK);
+
+  return getGroupsResponse.groups.find((group) => group.name === name) ?? createGroupResponse.group!;
+}
 
 export const addKeycloakUser = async ({
   keycloakClient,
@@ -380,7 +490,7 @@ export const addKeycloakUser = async ({
   keycloakClient: Keycloak;
   userTestData: UserTestData;
   realmName: string;
-}) => {
+}): Promise<[string, string | undefined]> => {
   await keycloakClient.authenticateClient();
 
   let id = '';
@@ -404,19 +514,24 @@ export const addKeycloakUser = async ({
       throw e;
     }
   }
+
+  let kcRootGroupId: string | undefined;
   try {
-    await keycloakClient.seedGroup({
+    const [rootGroupId] = await keycloakClient.seedGroup({
       realm: realmName,
       userID: id,
       organizationSlug: userTestData.organizationSlug,
     });
+
+    kcRootGroupId = rootGroupId;
   } catch (e: any) {
     if (e.response?.status !== 409) {
       e.message = `Failed to seed group: ${userTestData.organizationSlug}.` + e.message;
       throw e;
     }
   }
-  return id;
+
+  return [id, kcRootGroupId];
 };
 
 export const removeKeycloakSetup = async ({
