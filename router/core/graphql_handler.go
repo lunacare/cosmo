@@ -218,7 +218,7 @@ func (h *GraphQLHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		respBuf := bytes.Buffer{}
 
-		resp, err := h.executor.Resolver.ResolveGraphQLResponse(resolveCtx, p.Response, nil, &respBuf)
+		_, err := h.executor.Resolver.ResolveGraphQLResponse(resolveCtx, p.Response, nil, &respBuf)
 		reqCtx.dataSourceNames = getSubgraphNames(p.Response.DataSources)
 
 		if err != nil {
