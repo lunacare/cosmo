@@ -11,6 +11,8 @@ import (
 
 	"github.com/buger/jsonparser"
 	"github.com/wundergraph/cosmo/router/core"
+	rtrace "github.com/wundergraph/cosmo/router/pkg/trace"
+	"go.opentelemetry.io/otel/attribute"
 	"go.uber.org/zap"
 )
 
@@ -18,7 +20,11 @@ func init() {
 	core.RegisterModule(&FileUploadEmptyVarModule{})
 }
 
-const FileUploadEmptyVarModuleID = "com.getluna.file-upload-empty-var"
+const (
+	FileUploadEmptyVarModuleID = "com.getluna.file-upload-empty-var"
+	fileUploadTracerName       = "lunacare/cosmo/router/file-upload"
+	fileUploadSpanName         = "lunacare.file_upload.normalize"
+)
 
 // multipartReadFormMemory is the in-memory threshold for multipart.Reader.ReadForm.
 // Parts smaller than this stay in memory; larger parts spill to disk. 32 MiB matches
@@ -26,6 +32,14 @@ const FileUploadEmptyVarModuleID = "com.getluna.file-upload-empty-var"
 const multipartReadFormMemory = 32 << 20
 
 type FileUploadEmptyVarModule struct {
+	// Enabled toggles the module. Defaults to false — the multipart rewrite is
+	// a no-op unless the router config explicitly opts in:
+	//
+	//	modules:
+	//	  com.getluna.file-upload-empty-var:
+	//	    enabled: true
+	Enabled bool `mapstructure:"enabled"`
+
 	Logger *zap.Logger
 }
 
@@ -38,28 +52,48 @@ func (m *FileUploadEmptyVarModule) RouterOnRequest(ctx core.RequestContext, next
 	r := ctx.Request()
 	w := ctx.ResponseWriter()
 
+	if !m.Enabled {
+		next.ServeHTTP(w, r)
+		return
+	}
+
 	contentType := r.Header.Get("Content-Type")
 	if contentType == "" {
 		next.ServeHTTP(w, r)
 		return
 	}
-
 	mediatype, params, err := mime.ParseMediaType(contentType)
 	if err != nil || mediatype != "multipart/form-data" {
 		next.ServeHTTP(w, r)
 		return
 	}
 
-	boundary, ok := params["boundary"]
-	if !ok {
-		core.WriteResponseError(ctx, fmt.Errorf("no boundary found in multipart form"))
+	if err := m.rewriteMultipart(r, params); err != nil {
+		core.WriteResponseError(ctx, err)
 		return
 	}
+	next.ServeHTTP(w, r)
+}
 
+func (m *FileUploadEmptyVarModule) rewriteMultipart(r *http.Request, params map[string]string) error {
+	tracer := tracerFromContext(r.Context(), fileUploadTracerName)
+	_, span := tracer.Start(r.Context(), fileUploadSpanName)
+	defer span.End()
+	span.SetAttributes(attribute.String("module.id", FileUploadEmptyVarModuleID))
+
+	boundary, ok := params["boundary"]
+	if !ok {
+		err := fmt.Errorf("no boundary found in multipart form")
+		rtrace.AttachErrToSpan(span, err)
+		return err
+	}
+
+	bytesIn := r.ContentLength
 	form, err := multipart.NewReader(r.Body, boundary).ReadForm(multipartReadFormMemory)
 	if err != nil {
-		core.WriteResponseError(ctx, fmt.Errorf("error reading multipart form: %w", err))
-		return
+		wrapped := fmt.Errorf("error reading multipart form: %w", err)
+		rtrace.AttachErrToSpan(span, wrapped)
+		return wrapped
 	}
 	defer form.RemoveAll()
 
@@ -93,8 +127,9 @@ func (m *FileUploadEmptyVarModule) RouterOnRequest(ctx core.RequestContext, next
 			return setErr
 		})
 		if err := firstNonNil(mapErr, setErr); err != nil {
-			core.WriteResponseError(ctx, fmt.Errorf("error normalizing multipart map: %w", err))
-			return
+			wrapped := fmt.Errorf("error normalizing multipart map: %w", err)
+			rtrace.AttachErrToSpan(span, wrapped)
+			return wrapped
 		}
 		didRewrite = true
 	}
@@ -105,38 +140,50 @@ func (m *FileUploadEmptyVarModule) RouterOnRequest(ctx core.RequestContext, next
 	for key, values := range form.Value {
 		if key == "operations" && didRewrite {
 			if err := parsedMultipart.WriteField("operations", string(rewrittenOperations)); err != nil {
-				core.WriteResponseError(ctx, fmt.Errorf("error writing operations field: %w", err))
-				return
+				wrapped := fmt.Errorf("error writing operations field: %w", err)
+				rtrace.AttachErrToSpan(span, wrapped)
+				return wrapped
 			}
 			continue
 		}
 		for _, value := range values {
 			if err := parsedMultipart.WriteField(key, value); err != nil {
-				core.WriteResponseError(ctx, fmt.Errorf("error writing field %s: %w", key, err))
-				return
+				wrapped := fmt.Errorf("error writing field %s: %w", key, err)
+				rtrace.AttachErrToSpan(span, wrapped)
+				return wrapped
 			}
 		}
 	}
 
+	var fileCount int
 	for key, files := range form.File {
 		for _, fileHeader := range files {
 			if err := copyFormFile(parsedMultipart, key, fileHeader); err != nil {
-				core.WriteResponseError(ctx, err)
-				return
+				rtrace.AttachErrToSpan(span, err)
+				return err
 			}
+			fileCount++
 		}
 	}
 
 	if err := parsedMultipart.Close(); err != nil {
-		core.WriteResponseError(ctx, fmt.Errorf("error finalizing multipart body: %w", err))
-		return
+		wrapped := fmt.Errorf("error finalizing multipart body: %w", err)
+		rtrace.AttachErrToSpan(span, wrapped)
+		return wrapped
 	}
 
 	r.Header.Set("Content-Type", parsedMultipart.FormDataContentType())
 	r.Body = io.NopCloser(&body)
 	r.ContentLength = int64(body.Len())
 
-	next.ServeHTTP(w, r)
+	span.SetAttributes(
+		attribute.Int("multipart.fields", len(form.Value)),
+		attribute.Int("multipart.files", fileCount),
+		attribute.Bool("multipart.did_rewrite", didRewrite),
+		attribute.Int64("multipart.bytes_in", bytesIn),
+		attribute.Int64("multipart.bytes_out", int64(body.Len())),
+	)
+	return nil
 }
 
 func copyFormFile(mw *multipart.Writer, field string, fh *multipart.FileHeader) error {
