@@ -5,7 +5,7 @@ go 1.25
 require (
 	github.com/99designs/gqlgen v0.17.76
 	github.com/google/uuid v1.6.0
-	github.com/gorilla/websocket v1.5.1
+	github.com/gorilla/websocket v1.5.3
 	github.com/nats-io/nats.go v1.35.0
 	github.com/ravilushqa/otelgqlgen v0.13.1
 	github.com/rs/cors v1.11.0
