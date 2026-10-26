@@ -1,5 +1,5 @@
 # Use Node.js LTS version
-FROM node:20-alpine
+FROM node:22-alpine
 
 # Install pnpm
 RUN corepack enable && corepack prepare pnpm@latest --activate
