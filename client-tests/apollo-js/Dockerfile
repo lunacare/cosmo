@@ -1,5 +1,5 @@
 # Use Node.js LTS version
-FROM node:22-alpine
+FROM 836236105554.dkr.ecr.us-west-2.amazonaws.com/mirror:node-22-alpine
 
 # Install pnpm
 RUN corepack enable && corepack prepare pnpm@latest --activate
